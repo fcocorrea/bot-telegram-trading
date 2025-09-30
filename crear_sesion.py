@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 import os
 
 # Reemplaza con tus propios valores
+load_dotenv()
 api_id = int(os.getenv('TELEGRAM_API_ID'))
 api_hash = os.getenv('TELEGRAM_API_HASH')
 nombre_de_la_sesion = 'mi_sesion_telegram' # El nombre de tu sesión va aquí

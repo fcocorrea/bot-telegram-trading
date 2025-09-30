@@ -2,8 +2,6 @@
 
 Este proyecto es un bot de trading que actúa como un puente inteligente entre un proveedor de señales en Telegram y tu cuenta de trading. Su función principal es escuchar en tiempo real los mensajes de un canal, interpretarlos y ejecutar las operaciones correspondientes sin intervención manual.
 
-La característica más potente es su capacidad para **sincronizar carteras de órdenes pendientes**. Cuando el proveedor de señales envía una lista actualizada, el bot primero cancela las órdenes antiguas y luego crea las nuevas, asegurando que tu cuenta refleje siempre la estrategia más reciente.
-
 -----
 
 ## ✨ Características Principales
@@ -11,7 +9,7 @@ La característica más potente es su capacidad para **sincronizar carteras de �
   * **Conexión en Tiempo Real:** Utiliza una arquitectura asíncrona para escuchar y procesar mensajes de Telegram de forma instantánea y eficiente.
   * **Análisis Inteligente de Señales:** Emplea expresiones regulares para extraer con precisión los parámetros de cada operación: activo, tipo de orden, precio de entrada y stop loss.
   * **Ejecución Automatizada:** Se integra directamente con la terminal de MetaTrader 5 para colocar órdenes a mercado y pendientes.
-  * **Sincronización de Órdenes:** Mantiene la cartera de órdenes pendientes siempre actualizada, eliminando las antiguas y creando las nuevas en cada señal masiva.
+  * **Sincronización de Órdenes:** Mantiene la cartera de órdenes pendientes siempre actualizada.
   * **Soporte para Múltiples Activos:** Diseñado para manejar una amplia gama de símbolos, incluyendo criptomonedas (`BTCUSD`), índices (`UK100`, `US500`) y más.
   * **Configuración Segura:** Gestiona las credenciales de forma segura a través de variables de entorno, sin exponer datos sensibles en el código.
 
@@ -42,7 +40,7 @@ Sigue estos pasos para poner en funcionamiento el bot en tu propio sistema.
 1.  **Clona el repositorio:**
 
     ```bash
-    git clone https://github.com/tu-usuario/tu-repositorio.git
+    git clone https://github.com/fcocorrea/bot-telegram-trading.git
     cd tu-repositorio
     ```
 
@@ -103,7 +101,7 @@ Sigue estos pasos para poner en funcionamiento el bot en tu propio sistema.
     Descarga MT5 desde tu broker e ingresa a tu cuenta con tu usuario, clave y servidor. 
 
     * En `observación de mercado` asegúrate de tener habilitados los símbolos con los que vas a trabajar. Da clic derecho en la ventana de observación de mercado y has clic en "Símbolos". Luego, busca el símbolo que quieres operar y das clic en "Mostrar símbolo". De esta manera, MT5 podrá observar el precio en cada tick.
-    * Asegurate que el `trading algorítmico` esté activado.
+    * Asegúrate que el `trading algorítmico` esté activado.
 
 8.  **Ejecuta tu bot\!**
     Asegúrate de tener la terminal de MetaTrader 5 abierta y de haber iniciado sesión en tu cuenta. Luego, ejecuta el script `telegram.py`:
@@ -140,7 +138,6 @@ Buy limit Creada BTCUSD $113553.93, Sl: 73700
 ### **Sincronización de Órdenes Pendientes**
 
 Cuando se recibe un mensaje que contiene `ORDENES PENDIENTES`, el bot realiza un proceso de sincronización completo, añadiendo las ordenes pendientes que no han sido creadas en tu cuenta de trading e ignorando las que sí están creadas para evitar duplicidad de ordenes.
-<!-- end list -->
 
 ```
 ORDENES PENDIENTES

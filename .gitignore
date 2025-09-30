@@ -1,0 +1,9 @@
+# Entorno virtual de Python
+/venv
+
+# Archivo de variables de entorno (contiene secretos)
+.env
+
+# Archivos de sesión de Telegram (contienen credenciales de acceso)
+*.session
+*.session-journal

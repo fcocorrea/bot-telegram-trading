@@ -62,10 +62,10 @@ class TradingOrder:
         "stop_loss": "Stop Loss"
         }
         """
-        price_match = r"\$?([\d\.]+)"
-        stop_loss_match = r"Sl:\s?([\d\.]+)"
-        take_profit_match = r"Tp:\s?([\d\.]+)"
-        trailing_stop_match = r"SL [A-Z0-9]+ \$([\d\.]+)"                
+        price_match = r"\$?(\d+(\.\d+)?)"
+        stop_loss_match = r"Sl:\s?(\d+(\.\d+)?)"
+        take_profit_match = r"Tp:\s?(\d+(\.\d+)?)"
+        trailing_stop_match = r"SL [A-Z0-9]+ \$(\d+(\.\d+)?)"         
         
 
         order_instruction = {}
@@ -77,9 +77,9 @@ class TradingOrder:
             # Extraemos el activo del grupo de captura (el paréntesis en la regex)
             asset = order_search.group(1)
             price_search = re.search(price_match, telegram_message)
-            stop_loss_search = re.search(stop_loss_match, telegram_message)
-            take_profit_search = re.search(take_profit_match, telegram_message)
-            trailing_stop_search = re.search(trailing_stop_match, telegram_message)            
+            stop_loss_search = re.search(stop_loss_match, telegram_message, re.IGNORECASE)
+            take_profit_search = re.search(take_profit_match, telegram_message, re.IGNORECASE)
+            trailing_stop_search = re.search(trailing_stop_match, telegram_message, re.IGNORECASE)            
             
             order_instruction["order_type"] = order_type.strip()
             order_instruction["asset"] = asset
@@ -173,7 +173,7 @@ class PendingOperations(TradingOrder):
         assets_in_message = set()
         split_orders = [line.strip() for line in telegram_message.splitlines() if line.strip().startswith("Buy Limit")]
         for line in split_orders:
-            match = re.search(r"Buy Limit\s+([A-Z0-9]+)\s([\d\.]+)", line)
+            match = re.search(r"Buy Limit\s+([A-Z0-9]+)\s(\d+(\.\d+)?)", line)
             groups = match.groups()
             if len(groups): # tengo el activo y el precio
                 concat = groups[0] + ">" + groups[1]

@@ -89,10 +89,10 @@ Sigue estos pasos para poner en funcionamiento el bot en tu propio sistema.
     ```
 
 6.  **Crea tu sesión**
-    Asegúrate de tener la terminal de MetaTrader 5 abierta y de haber iniciado sesión en tu cuenta. Luego, ejecuta el script `crear_sesion.py`:
+    Asegúrate de tener la terminal de MetaTrader 5 abierta y de haber iniciado sesión en tu cuenta. Luego, ejecuta el script `telegram.py`:
 
     ```bash
-    python crear_sesion.py.py
+    python telegram.py
     ```
 
     La primera vez que lo ejecutes, Telethon te pedirá tu número de teléfono, un código de verificación y, si la tienes, tu contraseña de doble factor para iniciar sesión.
@@ -107,7 +107,7 @@ Sigue estos pasos para poner en funcionamiento el bot en tu propio sistema.
     Asegúrate de tener la terminal de MetaTrader 5 abierta y de haber iniciado sesión en tu cuenta. Luego, ejecuta el script `telegram.py`:
 
     ```bash
-    python telegram.py.py
+    python telegram.py
     ```
 
     ¡Y listo! Tu bot estará escuchando tus mensajes de telegram y podrá operar sin que tu estés pendiente.

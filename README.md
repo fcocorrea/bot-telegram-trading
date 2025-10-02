@@ -103,14 +103,8 @@ Sigue estos pasos para poner en funcionamiento el bot en tu propio sistema.
     * En `observación de mercado` asegúrate de tener habilitados los símbolos con los que vas a trabajar. Da clic derecho en la ventana de observación de mercado y has clic en "Símbolos". Luego, busca el símbolo que quieres operar y das clic en "Mostrar símbolo". De esta manera, MT5 podrá observar el precio en cada tick.
     * Asegúrate que el `trading algorítmico` esté activado.
 
-8.  **Ejecuta tu bot\!**
-    Asegúrate de tener la terminal de MetaTrader 5 abierta y de haber iniciado sesión en tu cuenta. Luego, ejecuta el script `telegram.py`:
-
-    ```bash
-    python telegram.py
-    ```
-
-    ¡Y listo! Tu bot estará escuchando tus mensajes de telegram y podrá operar sin que tu estés pendiente.
+8.  **¡Todo listo!\!**
+    Asegúrate de tener la terminal de MetaTrader 5 abierta y de haber iniciado sesión en tu cuenta. Ahora, tu bot debería de estar permanentemente escuchando los mensajes de Telegram y ejecutando las ordenes correspondientes sin que tu estés pendiente.
 
 -----
 

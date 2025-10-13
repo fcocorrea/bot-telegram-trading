@@ -88,7 +88,7 @@ class TradingOrder:
                 order_instruction["price"] = price_search.group(1)
                 order_instruction["stop_loss"] = "0.0" if not stop_loss_search else stop_loss_search.group(1)
                 order_instruction["take_profit"] = "0.0" if not take_profit_search else take_profit_search.group(1)
-            elif order_type == "Trailing Stop" and trailing_stop_search: 
+            elif order_type == "Trailing Stop" and trailing_stop_search or order_type == "Cierre": 
                  order_instruction["price"] = "0" # Precio no aplica para trailing stop
                  order_instruction["stop_loss"] = trailing_stop_search.group(1)
 
@@ -102,7 +102,8 @@ class TradingOrder:
             "Buy Limit ": rf"Buy Limit ({asset_pattern})", # Buy Limit para operaciones pendientes
             "Compra": rf"Compra\s({asset_pattern})",
             "Venta": rf"Venta\s({asset_pattern})",
-            "Trailing Stop": rf"SL\s({asset_pattern})"
+            "Trailing Stop": rf"SL\s({asset_pattern})",
+            "Cierre": rf"Cierre\s({asset_pattern})"
         }
         for order_type, order_match in orders.items():
             order_call = self.catch_order(telegram_message, order_type, order_match)
@@ -159,6 +160,8 @@ class TradingOrder:
             self.my_trading_account.execute_sell(asset, stop_loss, take_profit)
         elif order_type == "Trailing Stop":
             self.my_trading_account.execute_trailing_stop(asset, stop_loss)
+        elif order_type == "Cierre":
+            self.my_trading_account.close_profit_trades(asset)
         
 class PendingOperations(TradingOrder):
     """ Clase que maneja el mensaje de las operaciones pendientes """
@@ -174,6 +177,7 @@ class PendingOperations(TradingOrder):
         split_orders = [line.strip() for line in telegram_message.splitlines() if line.strip().startswith("Buy Limit")]
         for line in split_orders:
             match = re.search(r"Buy Limit\s+([A-Z0-9]+)\s(\d+(\.\d+)?)", line)
+            if not match: continue # en caso que no se haya encontrado match
             groups = match.groups()
             if len(groups): # tengo el activo y el precio
                 concat = groups[0] + ">" + groups[1]
@@ -325,6 +329,10 @@ class TradingAccount:
             print("Posición ticket: {}".format(result.order))
 
     def execute_trailing_stop(self, asset, stop_loss):
+        """
+        Implementación de trailing stop
+        """
+        min_profit = 0.2 # minima ganancia esperada para cerrar una posición
         positions = mt5.positions_get()
         if positions is None:
             print("No se encontraron posiciones, código de error =", mt5.last_error())
@@ -332,7 +340,7 @@ class TradingAccount:
                 
         position_found = False
         for position in positions:
-            if position.symbol == asset and position.profit > 0:
+            if position.symbol == asset and position.profit > min_profit:
                 position_found = True
                 print(f"Posición encontrada para {asset} con ticket {position.ticket} y ganancia de {position.profit:.2f}")
                 modificar_sl_compra = (position.type == mt5.ORDER_TYPE_BUY and 
@@ -344,16 +352,19 @@ class TradingAccount:
                 
                 if modificar_sl_compra or modificar_sl_venta:
                     print(f"  Modificando SL. Actual: {position.sl}, Nuevo: {stop_loss}")
+                    current_tp = position.tp
                     request = {
                         "action": mt5.TRADE_ACTION_SLTP,
                         "position": position.ticket,
                         "sl": stop_loss,
+                        "tp": current_tp, # especificamos el take profit actual para no configurarlo a 0.
                         "comment": "Trailing Stop Update",
                     }
                     result = mt5.order_send(request)
                     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                        print("Error al modificar el Stop Loss.")
-                        self.print_failed_operation(result)
+                        print(f"Error al modificar el Stop Loss al precio {stop_loss}.")
+                        print(f"Intentaremos cerrar las posiciones abiertas de {asset} en positivo.")
+                        self.close_profit_trades(asset)
                     else:
                         print("  ¡Stop Loss modificado exitosamente!")
                 else:
@@ -362,6 +373,58 @@ class TradingAccount:
         if not position_found:
             print(f"No se encontró una posición abierta y rentable para {asset}.")
 
+    def close_profit_trades(self, asset):
+            """
+            Cierra todas las operaciones abiertas para un activo específico que tengan ganancias.
+            """
+            min_profit = 0.2 # minima ganancia esperada para cerrar una posición
+            if not self._check_and_enable_symbol(asset): # Asegurarse de que el símbolo esté disponible
+                return
+            positions = mt5.positions_get(symbol=asset) # Obtener solo las posiciones para el activo de interés
+            if positions is None:
+                print(f"No se pudieron obtener posiciones para {asset}. Error: {mt5.last_error()}")
+                return
+
+            if not positions:
+                print(f"No se encontraron posiciones abiertas para {asset}.")
+                return
+            
+            closed_any = False
+
+            for position in positions:
+                if position.profit > min_profit:
+                    print(f"Posición rentable encontrada para {asset} (Ticket: {position.ticket}, Ganancia: {position.profit:.2f}). Intentando cerrar...")
+                    
+                    # Si la posición es de compra (BUY), debemos vender (SELL) para cerrarla, y viceversa.
+                    order_type_close = mt5.ORDER_TYPE_SELL if position.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                    
+                    # Determinar la política de ejecución (filling mode)
+                    filling_mode = mt5.ORDER_FILLING_IOC if asset in self.crypto_symbols else mt5.ORDER_FILLING_FOK
+
+                    request = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "position": position.ticket,
+                        "symbol": asset,
+                        "volume": position.volume,
+                        "type": order_type_close,
+                        "deviation": 20,
+                        "magic": 1234, # Mismo magic number para consistencia
+                        "comment": "Cierre con ganancia",
+                        "type_time": mt5.ORDER_TIME_GTC,
+                        "type_filling": filling_mode,
+                    }
+
+                    result = mt5.order_send(request)
+
+                    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                        print(f"Error al cerrar la posición {position.ticket}.")
+                        self.print_failed_operation(result)
+                    else:
+                        print(f"¡Posición {position.ticket} para {asset} cerrada exitosamente!")
+                        closed_any = True
+                        
+            if not closed_any:
+                print(f"No se encontraron posiciones rentables para cerrar en {asset}.")
     
 
     def _check_and_enable_symbol(self, asset):

@@ -6,4 +6,4 @@
 
 # Archivos de sesión de Telegram (contienen credenciales de acceso)
 *.session
-*.session-journal
+*.session-journal__pycache__/

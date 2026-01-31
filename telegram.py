@@ -4,6 +4,7 @@ import re
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 import MetaTrader5 as mt5
+import strategy
 
 class TelegramInput:
     """Clase que lee los mensajes de mi Telegram y los expone a través de una cola."""
@@ -13,30 +14,40 @@ class TelegramInput:
         self.api_hash = api_hash
         self.session_name = "mi_sesion_trading"
         self.queue = asyncio.Queue()  # Cola para compartir mensajes
+        self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
 
     async def handle_new_message(self, event: events.NewMessage.Event):
         """Maneja nuevos mensajes recibidos."""
         sender = await event.get_sender()
         message_text = event.raw_text
+        username = sender.username if sender else None
         mensaje = {
-            "username": sender.username,
+            "username": username,
             "text": message_text,
             "chat_id": event.chat_id,
         }
-        # Metemos el mensaje a la cola
         await self.queue.put(mensaje)
 
     async def start_listening(self):
         """Inicia la escucha de mensajes."""
-        client = TelegramClient(self.session_name, self.api_id, self.api_hash)
-
-        @client.on(events.NewMessage)
+        
+        @self.client.on(events.NewMessage)
         async def new_message_listener(event):
             await self.handle_new_message(event)
 
-        print("Bot escuchando tus chats de Telegram...")
-        async with client:
-            await client.run_until_disconnected()
+        print("Bot escuchando mensajes del grupo \"VIP Trading\"...")
+        # Usamos async with para manejar la conexión y desconexión
+        try:
+            async with self.client:
+                await self.client.run_until_disconnected()
+        except asyncio.CancelledError:
+            print("Deteniendo la escucha de Telegram...")
+            if self.client.is_connected():
+                await self.client.disconnect()
+            print("Cliente de Telegram desconectado.")
+        except Exception as e:
+            print(f"Error en start_listening: {e}")
+
 
     async def get_message(self):
         """Obtiene el siguiente mensaje de la cola (espera hasta que haya uno)."""
@@ -45,61 +56,54 @@ class TelegramInput:
 class TradingOrder:
     """ Clase que toma los mensajes de mi telegram y los 
     convierte en ordenes para Meta Trader 5.
-    
     """
     
-    def __init__(self, my_trading_account:object):
+    def __init__(self, my_trading_account:object, cobertura:object, estrategia:dict):
         self.my_trading_account = my_trading_account
+        self.cobertura = cobertura
+        self.estrategia = estrategia
+        
         
     def catch_order(self, telegram_message:str, order_type:str, order_match:str)->dict:
-        """ Capturamos la orden de compra desde Telegram.
-        El resultado es un diccionario.
-
-        {
-        "order_type": "Orden del movimiento",
-        "asset": "Nemo",
-        "price": "Precio de apertura",
-        "stop_loss": "Stop Loss"
-        }
-        """
+        # Esta función es síncrona (solo regex)
         price_match = r"\$?(\d+(\.\d+)?)"
         stop_loss_match = r"Sl:\s?(\d+(\.\d+)?)"
         take_profit_match = r"Tp:\s?(\d+(\.\d+)?)"
         trailing_stop_match = r"SL [A-Z0-9]+ \$(\d+(\.\d+)?)"         
         
-
         order_instruction = {}
-        
-        # Buscamos la coincidencia completa de la orden
         order_search = re.search(order_match, telegram_message, re.IGNORECASE)
-        # Si encontramos una coincidencia para la orden (ej. "Buy Limit Creada BTCUSD...")
+        
         if order_search:
-            # Extraemos el activo del grupo de captura (el paréntesis en la regex)
-            asset = order_search.group(1)
+            asset_base = order_search.group(1)
+            asset = asset_base
             price_search = re.search(price_match, telegram_message)
             stop_loss_search = re.search(stop_loss_match, telegram_message, re.IGNORECASE)
             take_profit_search = re.search(take_profit_match, telegram_message, re.IGNORECASE)
-            trailing_stop_search = re.search(trailing_stop_match, telegram_message, re.IGNORECASE)            
+            trailing_stop_search = re.search(trailing_stop_match, telegram_message, re.IGNORECASE)        
             
             order_instruction["order_type"] = order_type.strip()
-            order_instruction["asset"] = asset
-            
+            order_instruction["asset"] = asset          
             if order_type != "Trailing Stop" and price_search: 
                 order_instruction["price"] = price_search.group(1)
                 order_instruction["stop_loss"] = "0.0" if not stop_loss_search else stop_loss_search.group(1)
                 order_instruction["take_profit"] = "0.0" if not take_profit_search else take_profit_search.group(1)
+                order_instruction["volume"] = self.calculate_volume(asset, order_instruction["price"], order_instruction["stop_loss"])
             elif order_type == "Trailing Stop" and trailing_stop_search or order_type == "Cierre": 
-                 order_instruction["price"] = "0" # Precio no aplica para trailing stop
-                 order_instruction["stop_loss"] = trailing_stop_search.group(1)
+                 order_instruction["price"] = "0"
+                 order_instruction["stop_loss"] = "0.0" if not trailing_stop_search else trailing_stop_search.group(1)
 
         return order_instruction
     
     def catch_orders(self, telegram_message):
-        """ Función que puede capturar varias ordenes distintas """
-        asset_pattern = r"[A-Z0-9]+"
+        # Esta función es síncrona (solo regex)
+        try:
+            asset_pattern = self.estrategia["asset_regex"]
+        except KeyError:
+            asset_pattern = r"[A-Z0-9]+" # Si el usuario no especifica un activo, asumimos que los quiere todos.
         orders = {
             "Buy Limit": rf"Buy limit Creada ({asset_pattern})",
-            "Buy Limit ": rf"Buy Limit ({asset_pattern})", # Buy Limit para operaciones pendientes
+            "Buy Limit ": rf"Buy Limit ({asset_pattern})",
             "Compra": rf"Compra\s({asset_pattern})",
             "Venta": rf"Venta\s({asset_pattern})",
             "Trailing Stop": rf"SL\s({asset_pattern})",
@@ -109,133 +113,168 @@ class TradingOrder:
             order_call = self.catch_order(telegram_message, order_type, order_match)
             if order_call: 
                 return order_call
-        # Si no encuentra ninguna orden, retorna un diccionario vacío para evitar errores
         return {}
-    
-    def execute_pending_orders(self, telegram_message):
-        """ 
-        Función que captura las ordenes pendientes y las ejecuta.
-        Si el mercado está cerrado no podrá ejecutar las ordenes pendientes. En ese caso, 
-        agregarlas manualmente cuando el mercado abra.
-        """
-        # 1. Eliminamos todas las ordenes pendientes
-        self.my_trading_account.delete_all_pending_orders()
-        # 2. Separa cada línea que representa una orden
-        split_orders = [line.strip() for line in telegram_message.splitlines() if line.strip().startswith("Buy Limit")]
-        
-        # 3. Itera sobre cada orden individual
-        
-        for message_order in split_orders:
-            # 3. Ejecutamos la orden
-            self.execute_order(message_order)
 
-
-    def execute_order(self, telegram_message):
+    async def execute_order(self, telegram_message):
         order = self.catch_orders(telegram_message)
-        # Verificamos que la orden no esté vacía antes de proceder
         if not order:
             print("No se detectó una orden válida en el mensaje.")
             return
+        
+        accept_order = await self.filter_order_by_strategy(order)
+        if not accept_order: return
+
         print("Orden de trading: ", order)
         order_type = order.get("order_type")
         asset = order.get("asset")
-        # Usamos .get() con un valor por defecto para más seguridad
+        
         try:
             price = float(order.get("price", 0.0))
             stop_loss = float(order.get("stop_loss", 0.0))
             take_profit = float(order.get("take_profit", 0.0))
+            volume = float(order.get("volume", 0.0))
         except ValueError:
-            print("Error al intentar convertir un precio, stop loss o take profit a número:")
-            print(f"Precio: {price}\nStop Loss: {stop_loss}\nTake Profit: {take_profit}")
+            print("Error al convertir datos numéricos.")
+            return
         
         if not order_type or not asset:
             print("La orden detectada no tiene tipo o activo. Omitiendo.")
             return
-
+        
         if order_type == "Buy Limit":
-            self.my_trading_account.execute_buy_limit(asset, price, stop_loss, take_profit)
+            await self.my_trading_account.execute_buy_limit(asset, price, stop_loss, take_profit, volume)
         elif order_type == "Compra":
-            self.my_trading_account.execute_buy(asset, stop_loss, take_profit)
+            await self.my_trading_account.execute_buy(asset, stop_loss, take_profit, volume)
         elif order_type == "Venta":
-            self.my_trading_account.execute_sell(asset, stop_loss, take_profit)
+            await self.my_trading_account.execute_sell(asset, stop_loss, take_profit, volume)
         elif order_type == "Trailing Stop":
-            self.my_trading_account.execute_trailing_stop(asset, stop_loss)
+            await self.my_trading_account.execute_trailing_stop(asset, stop_loss)
         elif order_type == "Cierre":
-            self.my_trading_account.close_profit_trades(asset)
+            await self.my_trading_account.close_profit_trades(asset, stop_loss)
+        
+        # Gestionamos la cobertura después de realizar la orden
+        await self.cobertura.gestionar_cobertura()
+
+    async def filter_order_by_strategy(self, order):        
+
+        my_strategy = strategy.Strategy(self.cobertura, order, **self.estrategia)
+        return await my_strategy.filter_order()
+    
+    def calculate_volume(self, asset, price, stop_loss):
+        try:
+            risk = self.estrategia["risk"][asset]
+        except (KeyError, TypeError) as e:
+            print(f"Error detectado ({type(e).__name__}). Usando riesgo por defecto: 0.01")
+            risk = 0.01
+        try:
+            price = float(price)
+            stop_loss = float(stop_loss)
+        except ValueError:
+            print("No pudimos convertir el precio o stop loss a un valor numérico.")
+            return 0.0 # No podemos utilizar price o stop loss, por lo que no ejecutamos la orden
+
+        account_info = mt5.account_info()
+        balance = account_info.balance if account_info else 0
+        volume = round((risk * balance) / abs(price - stop_loss), 2)
+        info_symbol = mt5.symbol_info(asset)
+        if info_symbol is None:
+                    print(f"Error: El símbolo {asset} no existe en el Market Watch de MT5.")
+                    return 0.0
+        min_volume  = info_symbol.volume_min
+        if volume < min_volume:
+            print("El riesgo de esta operación es mayor al esperado.")
+            return 0.0
+        else:
+            return volume
         
 class PendingOperations(TradingOrder):
     """ Clase que maneja el mensaje de las operaciones pendientes """
 
-    def __init__(self, my_trading_account):
-        self.pending_orders = mt5.orders_get()
-        super().__init__(my_trading_account)
+    def __init__(self, my_trading_account, cobertura, estrategia):
+        # __init__ debe ser ligero. No hacer llamadas MT5 aquí.
+        self.pending_orders = None # Se cargará bajo demanda
+        super().__init__(my_trading_account, cobertura, estrategia)
         
     def get_pending_operations_in_message(self, telegram_message)->set:
-        """ Retorna un set de las operaciones pendientes desde el mensaje de señales
-        concadenando el activo con el precio. """
+        """
+        Devuelve un conjunto de strings. Cada string viene en la forma de activo>precio 
+        """
         assets_in_message = set()
         split_orders = [line.strip() for line in telegram_message.splitlines() if line.strip().startswith("Buy Limit")]
         for line in split_orders:
             match = re.search(r"Buy Limit\s+([A-Z0-9]+)\s(\d+(\.\d+)?)", line)
-            if not match: continue # en caso que no se haya encontrado match
+            if not match: continue
             groups = match.groups()
-            if len(groups): # tengo el activo y el precio
+            if len(groups):
                 concat = groups[0] + ">" + groups[1]
                 assets_in_message.add((line, concat))
         return assets_in_message
     
-    def get_pending_operations_in_trading_account(self):
-        """ Retorna un set de las operaciones pendientes desde una cuenta de trading
-        concadenando el activo con el precio. """
+    async def get_pending_operations_in_trading_account(self):
+        # Asíncrono, carga las órdenes solo cuando se necesita
         assets_in_account = set()
+        self.pending_orders = await asyncio.to_thread(mt5.orders_get)
+        
+        if self.pending_orders is None:
+            print("No se pudieron obtener órdenes pendientes de la cuenta.")
+            self.pending_orders = [] # Asegurar que sea iterable
+            return assets_in_account
+            
         for order in self.pending_orders:
             info_order = f"{order.symbol}>{order.price_open}"
             assets_in_account.add(info_order)
         return assets_in_account
     
-    def add_new_pending_orders(self, telegram_message):
-        """ Creamos nuevas ordenes pendientes en una cuenta de trading. Estas corresponden
-        a las ordenes pendientes que están en los mensajes de señales, pero no en nuestra cuenta. """
+    async def add_new_pending_orders(self, telegram_message):
         message_orders_and_lines = self.get_pending_operations_in_message(telegram_message)
         message_orders = {i[1] for i in message_orders_and_lines}
-        account_orders = self.get_pending_operations_in_trading_account()
+        account_orders = await self.get_pending_operations_in_trading_account()
+        
         new_orders = message_orders - account_orders
-        if not new_orders: print("No hay ordenes pendientes nuevas para agregar.")
+        if not new_orders: 
+            print("No hay ordenes pendientes nuevas para agregar.")
+            return
+            
         for new_order in new_orders:
             asset, price = new_order.split(">")
             message_lines = [l for l, o in message_orders_and_lines if asset in o and price in o]
             for message in message_lines:
-                self.execute_order(message)
+                await self.execute_order(message) # execute_order ya es async
 
-    def delete_old_pending_orders(self, telegram_message):
-        """ Buscamos ordenes que están en pendientes en nuestra cuenta de trading, pero
-        que no están en los mensajes enviados por telegram """
+    async def delete_old_pending_orders(self, telegram_message):
         message_orders_and_lines = self.get_pending_operations_in_message(telegram_message)
         message_orders = {i[1] for i in message_orders_and_lines}
-        account_orders = self.get_pending_operations_in_trading_account()
-        delete_orders = account_orders-message_orders
+        account_orders = await self.get_pending_operations_in_trading_account()
+        
+        delete_orders = account_orders - message_orders
+        
+        # self.pending_orders fue cargado por get_pending_operations_in_trading_account()
+        if self.pending_orders is None: return 
+        
         for order in self.pending_orders:
             info_order = f"{order.symbol}>{order.price_open}"
             if info_order in delete_orders:
                 request = {
-                    "action": mt5.TRADE_ACTION_REMOVE,  # cancelar orden pendiente
+                    "action": mt5.TRADE_ACTION_REMOVE,
                     "order": order.ticket,
                 }
-                result = mt5.order_send(request)
+                result = await asyncio.to_thread(mt5.order_send, request)
                 if result.retcode != mt5.TRADE_RETCODE_DONE:
                     print(f"Error al eliminar orden {order.ticket}: {result.retcode}")
                 else:
                     print(f"Orden {order.ticket} eliminada con éxito")
 
-    def manage_pending_orders(self, telegram_message):
-        self.delete_old_pending_orders(telegram_message)
-        self.add_new_pending_orders(telegram_message)
+    async def manage_pending_orders(self, telegram_message):
+        await self.delete_old_pending_orders(telegram_message)
+        await self.add_new_pending_orders(telegram_message)
 
 
 class TradingAccount:
     """ Clase para conectarse y operar en una cuenta de trading. """
 
     def __init__(self):
+        # __init__ es síncrono. La inicialización de MT5 es bloqueante
+        # pero se hace una sola vez al inicio, ANTES del bucle async.
         if not mt5.initialize():
             print("initialize() falló, error code =", mt5.last_error())
             quit()
@@ -243,38 +282,22 @@ class TradingAccount:
             print("¡Conexión con MetaTrader 5 establecida con éxito!")
         self.crypto_symbols = ['BTCUSD', 'ETHUSD']
 
-    def _get_trade_request(self, asset, order_type, sl=0.0, tp=0.0, price=0.0):
+    async def _get_trade_request(self, asset, order_type, volume, sl=0.0, tp=0.0, price=0.0):
         """
-        Construye un diccionario de solicitud de trade válido y adaptado al símbolo.
+        Construye un diccionario de solicitud de trade (asíncrono).
         """
-        symbol_info = mt5.symbol_info(asset)
-        if symbol_info is None:
+        if not await self._check_and_enable_symbol(asset):
             print(f"No se pudo obtener información para el símbolo {asset}")
             return None
-
-        # 1. Determinar el VOLUMEN correcto (usamos el mínimo permitido por el broker)
-        volume = symbol_info.volume_min
-
-        # 2. Determinar la POLÍTICA DE EJECUCIÓN correcta        
-        filling_mode = 0 # Valor por defecto
-        if asset in self.crypto_symbols:
-            filling_mode = mt5.ORDER_FILLING_IOC
-        else:
-            filling_mode = mt5.ORDER_FILLING_FOK
         
-        # 3. Construir la solicitud base
+        filling_mode = mt5.ORDER_FILLING_IOC if asset in self.crypto_symbols else mt5.ORDER_FILLING_FOK
+        
         request = {
-            "symbol": asset,
-            "volume": volume,
-            "sl": sl,
-            "tp": tp,
-            "magic": 1234,
-            "deviation": 20,
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": filling_mode,
+            "symbol": asset, "volume": volume, "sl": sl, "tp": tp,
+            "magic": 1234, "deviation": 20,
+            "type_time": mt5.ORDER_TIME_GTC, "type_filling": filling_mode,
         }
 
-        # 4. Ajustar parámetros según el tipo de orden
         request["type"] = order_type
         if order_type == mt5.ORDER_TYPE_BUY or order_type == mt5.ORDER_TYPE_SELL:
             request["action"] = mt5.TRADE_ACTION_DEAL
@@ -289,82 +312,84 @@ class TradingAccount:
 
         return request
 
-    def execute_buy_limit(self, asset, price, stop_loss, take_profit):
-        if not self._check_and_enable_symbol(asset): return
-        request = self._get_trade_request(asset, mt5.ORDER_TYPE_BUY_LIMIT, sl=stop_loss, tp=take_profit, price=price)
+    async def execute_buy_limit(self, asset, price, stop_loss, take_profit, volume):
+        if not await self._check_and_enable_symbol(asset): return
+        request = await self._get_trade_request(asset, mt5.ORDER_TYPE_BUY_LIMIT, volume, sl=stop_loss, tp=take_profit, price=price)
         if request is None: return
         
-        result = mt5.order_send(request)
+        result = await asyncio.to_thread(mt5.order_send, request)
+        
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             print("Error al enviar la orden Buy Limit.")
-            self.print_failed_operation(result)
+            await self.print_failed_operation(result)
         else:
             print("¡Orden Buy Limit enviada exitosamente!")
             print("Posición ticket: {}".format(result.order))
 
-    def execute_buy(self, asset, stop_loss, take_profit):
-        if not self._check_and_enable_symbol(asset): return
-        request = self._get_trade_request(asset, mt5.ORDER_TYPE_BUY, sl=stop_loss, tp=take_profit,)
+    async def execute_buy(self, asset, stop_loss, take_profit, volume):
+        if not await self._check_and_enable_symbol(asset): return
+        request = await self._get_trade_request(asset, mt5.ORDER_TYPE_BUY, volume, sl=stop_loss, tp=take_profit)
         if request is None: return
         
-        result = mt5.order_send(request)
+        result = await asyncio.to_thread(mt5.order_send, request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             print("Error al enviar la orden de Compra.")
-            self.print_failed_operation(result)
+            await self.print_failed_operation(result)
         else:
             print("¡Orden de Compra enviada exitosamente!")
             print("Posición ticket: {}".format(result.order))
 
-    def execute_sell(self, asset, stop_loss, take_profit):
-        if not self._check_and_enable_symbol(asset): return
-        request = self._get_trade_request(asset, mt5.ORDER_TYPE_SELL, sl=stop_loss, tp=take_profit,)
+    async def execute_sell(self, asset, stop_loss, take_profit, volume):
+        if not await self._check_and_enable_symbol(asset): return
+        request = await self._get_trade_request(asset, mt5.ORDER_TYPE_SELL, volume, sl=stop_loss, tp=take_profit)
         if request is None: return
         
-        result = mt5.order_send(request)
+        result = await asyncio.to_thread(mt5.order_send, request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             print("Error al enviar la orden de Venta.")
-            self.print_failed_operation(result)
+            await self.print_failed_operation(result)
         else:
             print("¡Orden de Venta enviada exitosamente!")
             print("Posición ticket: {}".format(result.order))
 
-    def execute_trailing_stop(self, asset, stop_loss):
-        """
-        Implementación de trailing stop
-        """
-        min_profit = 0.2 # minima ganancia esperada para cerrar una posición
-        positions = mt5.positions_get()
-        if positions is None:
-            print("No se encontraron posiciones, código de error =", mt5.last_error())
-            return
-                
+    async def execute_trailing_stop(self, asset, stop_loss):
+        positions = await asyncio.to_thread(mt5.positions_get)
         position_found = False
+        if positions is None:
+            print("No se encontraron posiciones, código de error =", await asyncio.to_thread(mt5.last_error))
+            return
         for position in positions:
-            if position.symbol == asset and position.profit > min_profit:
+            
+            position_profit, min_profit = self.check_position_profit(asset, position, stop_loss)
+            if position.symbol != asset:
+                continue
+            elif position_profit > 0 and position_profit < min_profit:
+                print(f"{asset}:  ganancia mínima ({min_profit}) > ganancia esperada ({position_profit})")
+
+            elif position_profit > min_profit:
                 position_found = True
-                print(f"Posición encontrada para {asset} con ticket {position.ticket} y ganancia de {position.profit:.2f}")
-                modificar_sl_compra = (position.type == mt5.ORDER_TYPE_BUY and 
+                print(f"Posición encontrada para {asset} con ticket {position.ticket} y ganancia de {position_profit:.2f}")
+                position_type = position.type
+                modificar_sl_compra = (position_type == 0 and 
                                     position.sl < stop_loss and 
                                     stop_loss > position.price_open)
-                modificar_sl_venta = (position.type == mt5.ORDER_TYPE_SELL and
+                modificar_sl_venta = (position_type == 1 and
                                     (position.sl > stop_loss or position.sl == 0) and 
                                     stop_loss < position.price_open)
                 
                 if modificar_sl_compra or modificar_sl_venta:
                     print(f"  Modificando SL. Actual: {position.sl}, Nuevo: {stop_loss}")
-                    current_tp = position.tp
                     request = {
                         "action": mt5.TRADE_ACTION_SLTP,
                         "position": position.ticket,
                         "sl": stop_loss,
-                        "tp": current_tp, # especificamos el take profit actual para no configurarlo a 0.
+                        "tp": position.tp,
                         "comment": "Trailing Stop Update",
                     }
-                    result = mt5.order_send(request)
+                    result = await asyncio.to_thread(mt5.order_send, request)
                     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                        print(f"Error al modificar el Stop Loss al precio {stop_loss}.")
-                        print(f"Intentaremos cerrar las posiciones abiertas de {asset} en positivo.")
-                        self.close_profit_trades(asset)
+                        print(f"Error al modificar el Stop Loss al precio {stop_loss}. Cerramos posiciones de {asset} en positivo.")
+                        await self.close_order_with_profit(asset, position)
                     else:
                         print("  ¡Stop Loss modificado exitosamente!")
                 else:
@@ -373,72 +398,80 @@ class TradingAccount:
         if not position_found:
             print(f"No se encontró una posición abierta y rentable para {asset}.")
 
-    def close_profit_trades(self, asset):
-            """
-            Cierra todas las operaciones abiertas para un activo específico que tengan ganancias.
-            """
-            min_profit = 0.2 # minima ganancia esperada para cerrar una posición
-            if not self._check_and_enable_symbol(asset): # Asegurarse de que el símbolo esté disponible
-                return
-            positions = mt5.positions_get(symbol=asset) # Obtener solo las posiciones para el activo de interés
-            if positions is None:
-                print(f"No se pudieron obtener posiciones para {asset}. Error: {mt5.last_error()}")
-                return
+    async def close_profit_trades(self, asset, stop_loss):
+        positions = await asyncio.to_thread(mt5.positions_get)
+        position_with_profit = False
+        if positions is None:
+            print("No se encontraron posiciones, código de error =", await asyncio.to_thread(mt5.last_error))
+            return
+                
+        for position in positions:
+            position_profit, min_profit = self.check_position_profit(asset, position, stop_loss)
+            if position_profit > min_profit:
+                position_with_profit = True
+                await self.close_order_with_profit(asset, position)
+        if not position_with_profit:
+            print("No hay posiciones con la ganancia suficiente para cerrarla.")
 
-            if not positions:
-                print(f"No se encontraron posiciones abiertas para {asset}.")
-                return
-            
-            closed_any = False
 
-            for position in positions:
-                if position.profit > min_profit:
-                    print(f"Posición rentable encontrada para {asset} (Ticket: {position.ticket}, Ganancia: {position.profit:.2f}). Intentando cerrar...")
-                    
-                    # Si la posición es de compra (BUY), debemos vender (SELL) para cerrarla, y viceversa.
-                    order_type_close = mt5.ORDER_TYPE_SELL if position.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                    
-                    # Determinar la política de ejecución (filling mode)
-                    filling_mode = mt5.ORDER_FILLING_IOC if asset in self.crypto_symbols else mt5.ORDER_FILLING_FOK
+    async def close_order_with_profit(self, asset, position):
+        order_type_close = mt5.ORDER_TYPE_SELL if position.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        filling_mode = mt5.ORDER_FILLING_IOC if asset in self.crypto_symbols else mt5.ORDER_FILLING_FOK
 
-                    request = {
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "position": position.ticket,
-                        "symbol": asset,
-                        "volume": position.volume,
-                        "type": order_type_close,
-                        "deviation": 20,
-                        "magic": 1234, # Mismo magic number para consistencia
-                        "comment": "Cierre con ganancia",
-                        "type_time": mt5.ORDER_TIME_GTC,
-                        "type_filling": filling_mode,
-                    }
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": position.ticket,
+            "symbol": asset,
+            "volume": position.volume,
+            "type": order_type_close,
+            "deviation": 20, "magic": 1234,
+            "comment": "Cierre con ganancia",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": filling_mode,
+        }
+        result = await asyncio.to_thread(mt5.order_send, request)
 
-                    result = mt5.order_send(request)
-
-                    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                        print(f"Error al cerrar la posición {position.ticket}.")
-                        self.print_failed_operation(result)
-                    else:
-                        print(f"¡Posición {position.ticket} para {asset} cerrada exitosamente!")
-                        closed_any = True
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            print(f"Error al cerrar la posición {position.ticket}.")
+            await self.print_failed_operation(result)
+        else:
+            print(f"¡Posición {position.ticket} para {asset} cerrada exitosamente!")
+            closed_any = True
                         
             if not closed_any:
-                print(f"No se encontraron posiciones rentables para cerrar en {asset}.")
-    
+                print(f"No se encontraron posiciones con la rentabilidad deseada para {asset}.")
 
-    def _check_and_enable_symbol(self, asset):
-        symbol_info = mt5.symbol_info(asset)
+    def check_position_profit(self, asset, position, stop_loss)-> tuple:
+        """ Calculamos el volumen mínimo de ganancia que estamos dispuestos a aceptar para cerrar la operación. """
+        min_profit = 0.2
+        position_type = position.type
+        position_volume = position.volume
+        position_price = position.price_open
+
+        if position_type == 0: # Compra
+            position_profit = round((stop_loss - position_price) * position_volume, 2)
+        else:
+            position_profit = round((position_price - stop_loss) * position_volume, 2)
+
+        info_symbol = mt5.symbol_info(asset)
+        min_volume  = info_symbol.volume_min
+        min_profit = min_profit * (position_volume / min_volume)
+        return position_profit, min_profit
+
+    
+    async def _check_and_enable_symbol(self, asset):
+        symbol_info = await asyncio.to_thread(mt5.symbol_info, asset)
         if symbol_info is None:
             print(f"El símbolo {asset} no fue encontrado.")
             return False
         if not symbol_info.visible:
-            if not mt5.symbol_select(asset, True): return False
+            if not await asyncio.to_thread(mt5.symbol_select, asset, True):
+                return False
         return True
 
-    def print_failed_operation(self, result):
+    async def print_failed_operation(self, result):
         if result is None:
-            print("La operación falló antes de enviar la solicitud a MT5. Error:", mt5.last_error())
+            print("La operación falló antes de enviar la solicitud a MT5. Error:", await asyncio.to_thread(mt5.last_error))
             return
         print("Falló el envío de la orden, retcode={}".format(result.retcode))
         result_dict = result._asdict()
@@ -449,41 +482,150 @@ class TradingAccount:
                 for req_field, req_value in traderequest_dict.items():
                     print(f"    traderequest: {req_field}={req_value}")
 
+# --- BUCLES ASÍNCRONOS Y LÓGICA PRINCIPAL ---
+
+async def exit_gracefully():
+    """
+    Cancela todas las tareas de asyncio excepto la actual,
+    permitiendo un apagado limpio.
+    """
+    print("Iniciando apagado elegante...")
+    current_task = asyncio.current_task()
+    tasks = [task for task in asyncio.all_tasks() if task is not current_task]
+    
+    if not tasks:
+        print("No hay otras tareas que cancelar.")
+        return
+
+    print(f"Cancelando {len(tasks)} tareas pendientes...")
+    for task in tasks:
+        task.cancel()
+    
+    await asyncio.sleep(0.1) # Dar tiempo a que se procesen las cancelaciones
+    print("Todas las tareas han sido señaladas para cancelación.")
+
+def limpiar_terminal():
+    # 'cls' para Windows, 'clear' para Linux/macOS
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print("--- Terminal limpiado automáticamente ---")
+
+async def daily_cleanup_loop(frequency_seconds=86400):
+    """
+    Bucle que limpia el terminal periódicamente.
+    Por defecto, cada 24 horas.
+    """
+    try:
+        while True:
+            await asyncio.sleep(frequency_seconds)
+            limpiar_terminal()
+    except asyncio.CancelledError:
+        print("Bucle de limpieza detenido.")
+
+async def process_messages_loop(telegram_input, order_obj):
+    """
+    Espera y procesa mensajes de Telegram.
+    """
+    my_trading_account = order_obj.my_trading_account
+    
+    try:
+        while True:
+            message = await telegram_input.get_message()
+            print("\nMensaje recibido:", message)
+            telegram_message = message["text"]
+            
+            if telegram_message.lower() == "quit":
+                print("Saliendo del programa. ¡Adiós! 👋")
+                await exit_gracefully()
+                break # Salir del bucle de mensajes
+
+            if "ORDENES PENDIENTES" in telegram_message:
+                pending_orders = PendingOperations(my_trading_account, order_obj.cobertura, order_obj.estrategia)
+                await pending_orders.manage_pending_orders(telegram_message)
+            else:
+                await order_obj.execute_order(telegram_message)
+
+    except asyncio.CancelledError:
+        print("Bucle de mensajes detenido limpiamente.")
+    except Exception as e:
+        print(f"Error fatal en process_messages_loop: {e}")
+
+async def monitor_coverage_loop(utilizar_cobertura, cobertura, frequency_seconds=15):
+    """
+    Bucle independiente que gestiona la cobertura periódicamente.
+    """
+    try:
+        while utilizar_cobertura:
+            try:
+                await asyncio.sleep(frequency_seconds) 
+                await cobertura.gestionar_cobertura()
+
+            except asyncio.CancelledError:
+                print("Monitor de cobertura detenido limpiamente.")
+                break 
+            except Exception as e:
+                print(f"Error en el bucle de monitor_coverage_loop: {e}")
+                await asyncio.sleep(60) 
+
+    except asyncio.CancelledError:
+        print("Monitor de cobertura detenido limpiamente.")
+
 
 async def main():
-    """Función principal para iniciar el bot de Telegram y consumir mensajes."""
+    """Función principal para iniciar el bot y los monitores."""
     load_dotenv()
     api_id = int(os.getenv("TELEGRAM_API_ID"))
     api_hash = os.getenv("TELEGRAM_API_HASH")
 
     if not api_id or not api_hash:
         raise ValueError(
-            "Por favor, asegúrate de que TELEGRAM_API_ID y TELEGRAM_API_HASH "
-            "estén configurados en el archivo .env"
+            "Asegúrate de que TELEGRAM_API_ID y TELEGRAM_API_HASH estén en .env"
         )
 
     telegram_input = TelegramInput(api_id, api_hash)
-
-    # Lanza la escucha en segundo plano
+    
+    # Iniciar la escucha de Telegram
     listener_task = asyncio.create_task(telegram_input.start_listening())
-    my_trading_account = TradingAccount() # Nos conectamos a mi cuenta de trading
-    order_obj = TradingOrder(my_trading_account)
-    # Ejemplo: consumir mensajes que llegan
-    while True:
-        message = await telegram_input.get_message()
-        print("Mensaje recibido:", message)
-        telegram_message = message["text"]
-        # Aquí podrías pasarlo a otro objeto, guardarlo en BD, etc.
+    
+    # Conectarse a la cuenta (esto es síncrono, se hace una vez)
+    my_trading_account = TradingAccount()
 
-        # Dejaremos afuera la gestión de ordenes pendientes por ahora.
+    # IMPORTANTE: En este punto, debemos descargar las preferencias del usuario para la estrategia
+    # Puede que el usuario no quiera una cobertura, si no un stop-loss!
 
-        if "ORDENES PENDIENTES" in telegram_message:
-            pending_orders = PendingOperations(my_trading_account)
-            pending_orders.manage_pending_orders(telegram_message)
-        else:         
-            order_obj.execute_order(telegram_message)
+    utilizar_cobertura = True
 
+    # Estos parámetros están aquí mientras tanto. La idea es que se descargen desde un campo rellenado por el usuario.
+    parametros_cobertura = {"asset": "BTCUSD", "margen_cobertura": 200, "balance": 0, "break_even": 200, "trailing_stop": 400}
+    parametros_estrategia = {"distance":{"BTCUSD": 0}, "pessimistic_resistance":{"BTCUSD": 0}, 
+                             "risk": {"BTCUSD": 0.5}, "asset_regex": r"BTCUSD"}
 
+    # Configurar la cobertura (síncrono, se hace una vez)
+    cobertura = strategy.Coverage(**parametros_cobertura)
+    order_obj = TradingOrder(my_trading_account, cobertura, parametros_estrategia)
+
+    # --- Lanzamos las tareas concurrentes ---
+    message_processor_task = asyncio.create_task(
+        process_messages_loop(telegram_input, order_obj)
+    )
+    
+    coverage_monitor_task = asyncio.create_task(
+        monitor_coverage_loop(utilizar_cobertura, cobertura, frequency_seconds=15) 
+    )
+
+    cleanup_task = asyncio.create_task(daily_cleanup_loop())
+
+    # Esperar a que todas las tareas se completen (o sean canceladas)
+    try:
+        await asyncio.gather(listener_task, message_processor_task, coverage_monitor_task, cleanup_task)
+    except asyncio.CancelledError:
+        print("El programa principal fue cancelado.")
+    finally:
+        # Asegurarse de que MT5 se apague limpiamente al final
+        mt5.shutdown()
+        print("Conexión con MetaTrader 5 cerrada. Apagado completado.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nApagado solicitado por el usuario (Ctrl+C).")

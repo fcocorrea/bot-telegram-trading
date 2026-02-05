@@ -153,7 +153,8 @@ class TradingOrder:
             await self.my_trading_account.close_profit_trades(asset, stop_loss)
         
         # Gestionamos la cobertura después de realizar la orden
-        await self.cobertura.gestionar_cobertura()
+        if self.cobertura:
+            await self.cobertura.gestionar_cobertura()
 
     async def filter_order_by_strategy(self, order):        
 
@@ -442,7 +443,10 @@ class TradingAccount:
                 print(f"No se encontraron posiciones con la rentabilidad deseada para {asset}.")
 
     def check_position_profit(self, asset, position, stop_loss)-> tuple:
-        """ Calculamos el volumen mínimo de ganancia que estamos dispuestos a aceptar para cerrar la operación. """
+        """ Calculamos la ganancia mínima que estamos dispuestos a aceptar para cerrar la operación.
+         La función devuelve una tupla, donde el primer valor es el profit de la posición y el
+         segundo valor es la ganancia mínima que estoy dispuesto a aceptar.
+        """
         min_profit = 0.2
         position_type = position.type
         position_volume = position.volume
@@ -592,15 +596,15 @@ async def main():
     # IMPORTANTE: En este punto, debemos descargar las preferencias del usuario para la estrategia
     # Puede que el usuario no quiera una cobertura, si no un stop-loss!
 
-    utilizar_cobertura = True
+    utilizar_cobertura = False
 
     # Estos parámetros están aquí mientras tanto. La idea es que se descargen desde un campo rellenado por el usuario.
-    parametros_cobertura = {"asset": "BTCUSD", "margen_cobertura": 200, "balance": 0, "break_even": 200, "trailing_stop": 400}
-    parametros_estrategia = {"distance":{"BTCUSD": 0}, "pessimistic_resistance":{"BTCUSD": 0}, 
-                             "risk": {"BTCUSD": 0.5}, "asset_regex": r"BTCUSD"}
+    parametros_cobertura = {"asset": "BTCUSDc", "margen_cobertura": 400, "balance": 0, "break_even": 200, "trailing_stop": 400}
+    parametros_estrategia = {"distance":{"BTCUSDc": 0}, "pessimistic_resistance":{"BTCUSDc": 0}, 
+                             "risk": {"BTCUSDc": 0.03}, "asset_regex": r"BTCUSD"}
 
     # Configurar la cobertura (síncrono, se hace una vez)
-    cobertura = strategy.Coverage(**parametros_cobertura)
+    cobertura = strategy.Coverage(**parametros_cobertura) if utilizar_cobertura else None
     order_obj = TradingOrder(my_trading_account, cobertura, parametros_estrategia)
 
     # --- Lanzamos las tareas concurrentes ---

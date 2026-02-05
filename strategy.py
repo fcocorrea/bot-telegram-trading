@@ -44,8 +44,9 @@ class Strategy:
         Vemos si una orden está lo suficientemente alejada de las otras ordenes activas y pendientes.
         Si está suficientemente alejada bajo el criterio del usuario, retornará True. De lo contrario, False
         """
-
-        all_orders = await self.cover.get_all_orders()
+        # Instanciamos la clase orders
+        orders = Orders()
+        all_orders = await orders.get_all_orders()
         trailing_stop_order = self.order_type == "Trailing Stop" # No filtraremos los trailing stop, dado que no son ordenes persé
         not_a_asset_match   = not re.search(self.asset_regex, self.asset) # Si el activo de la orden no es el que queremos, no la ejecutaremos
 
@@ -101,7 +102,7 @@ class Strategy:
                     if op_volume != vol_min:
                         # Si la operación nos deja con un riesgo de SO, probamos con lotaje mínimo
                         print("Probamos con lotaje mínimo para menor exposición de riesgo...")
-                        self.__check_risk_exposure(orders_list[:-1], vol_min)
+                        return await self.__check_risk_exposure(orders_list[:-1], vol_min)
                     else:
                         print(f"Orden rechazada: La orden \"{self.order_type}\" del activo {self.asset} con precio {self.price} deja una exposición mayor a la permitida.")
                         return False
@@ -142,104 +143,43 @@ class Coverage:
         self.trailing_stop = trailing_stop
         self.break_even = break_even
         self.margen_cobertura = margen_cobertura
-        self.ticket_cobertura = 0
         self.crypto_symbols = ['BTCUSD', 'ETHUSD']
         self.ultimo_precio_cobertura = 0
-
-        # --- Variables de control de cobertura ---
-        self.volumen_cobertura = 0
-        self.volumen_total = 0
-        self.cantidad_de_ordenes = 0
-        self.cobertura_activa = False
-
-    async def get_active_orders(self):
-        group_active_orders = defaultdict(list)
-        positions = await asyncio.to_thread(mt5.positions_get)
+        # Instanciamos la clase Orders
+        self.orders = Orders() 
         
-        if positions is not None:
-            for position in positions:
-                if position.comment == "cobertura":
-                    self.cobertura_activa = True
-                    self.ticket_cobertura = position.ticket
-                    self.volumen_cobertura = position.volume
-                else:
-                    volume = position.volume
-                    stop_loss = position.sl
-                    price = position.price_open
-                    if stop_loss >= price: continue # Ignoramos esta posición al no tener riesgos asociados.
-                    self.volumen_total += volume
-                    self.cantidad_de_ordenes += 1
-                    group_active_orders[position.symbol].append((position.price_open, volume))
-        return group_active_orders
-
-    async def get_pending_orders(self):
-        group_pending_orders = defaultdict(list)
-        orders = await asyncio.to_thread(mt5.orders_get)
-        
-        if orders is not None:
-            for order in orders:
-                if order.comment == "cobertura":
-                    self.cobertura_activa = False
-                    self.ticket_cobertura = order.ticket
-                    self.volumen_cobertura = order.volume_initial
-                else:
-                    volume = order.volume_initial
-                    stop_loss = order.sl
-                    price = order.price_open
-                    if stop_loss >= price: continue # Ignoramos esta posición al no tener riesgos asociados.
-                    self.volumen_total += volume
-                    self.cantidad_de_ordenes += 1
-                    group_pending_orders[order.symbol].append((order.price_open, volume))
-        return group_pending_orders     
-
-    async def get_all_orders(self)->dict:
-        """
-        Recupera todas las posiciones activas y órdenes pendientes de forma no bloqueante.
-
-        La estructura es:
-
-            {'Activo': [(Precio de apertura, Lotaje)], }
-
-        """
-        all_orders = defaultdict(list)
-        active_orders = await self.get_active_orders()
-        pending_orders = await self.get_pending_orders()
-        
-        for key, value_list in active_orders.items():
-            all_orders[key].extend(value_list)
-        for key, value_list in pending_orders.items():
-            all_orders[key].extend(value_list)
-        return dict(all_orders)
 
     async def gestionar_cobertura(self):
 
+        
+
         # Reseteamos los valores antes de recalcular
-        self.volumen_total = 0
-        self.cantidad_de_ordenes = 0
-        self.volumen_cobertura = 0
+        self.orders.volumen_total = 0
+        self.orders.cantidad_de_ordenes = 0
+        self.orders.volumen_cobertura = 0
 
         account_info = await asyncio.to_thread(mt5.account_info)
         balance_actual = account_info.balance
-        orders_list = await self.get_all_orders()
+        orders_list = await self.orders.get_all_orders()
         try:
             orders_list = orders_list[self.asset]
         except KeyError:
             # print(f"No hay ordenes de {self.asset} activas o pendientes. No se crea una cobertura.")
             return None
         
-        if self.cobertura_activa:
+        if self.orders.cobertura_activa:
             await self.gestionar_cobertura_activa()
 
         else:
-            if self.volumen_total == 0 and self.volumen_cobertura > 0:
+            if self.orders.volumen_total == 0 and self.orders.volumen_cobertura > 0:
                 # Hay una cobertura, pero no hay posiciones activas ni pendientes, por lo tanto, debemos eliminar la cobertura.
-                order_info_tuple = await asyncio.to_thread(mt5.orders_get, ticket=self.ticket_cobertura)
+                order_info_tuple = await asyncio.to_thread(mt5.orders_get, ticket=self.orders.ticket_cobertura)
                 await self.eliminar_cobertura_pendiente(order_info_tuple[0])
 
-            elif self.balance != balance_actual and self.volumen_total == self.volumen_cobertura:
+            elif self.balance != balance_actual and self.orders.volumen_total == self.orders.volumen_cobertura:
                 await self.modificar_cobertura_pendiente(orders_list, balance_actual)
 
-            elif self.volumen_total > 0 and self.volumen_cobertura:
+            elif self.orders.volumen_total > 0 and self.orders.volumen_cobertura:
                 await self.crear_cobertura(orders_list, balance_actual)
         
         self.balance = balance_actual
@@ -256,7 +196,7 @@ class Coverage:
         request = {
             "action": mt5.TRADE_ACTION_PENDING,
             "symbol": self.asset,
-            "volume": self.volumen_total,
+            "volume": self.orders.volumen_total,
             "type": mt5.ORDER_TYPE_SELL_STOP,
             "price": precio_cobertura,
             "sl": 0.0, "tp": 0.0, "magic": 1234,
@@ -271,13 +211,13 @@ class Coverage:
             last_error = await asyncio.to_thread(mt5.last_error)
             print(f"Detalle del último error de MT5: {last_error}")
         else:
-            self.ticket_cobertura = result.order
+            self.orders.ticket_cobertura = result.order
             print("¡Cobertura creada con éxito!")
 
     async def eliminar_cobertura_pendiente(self, order_info):
         request = {
                 "action": mt5.TRADE_ACTION_REMOVE,
-                "order": self.ticket_cobertura,
+                "order": self.orders.ticket_cobertura,
                 "symbol": order_info.symbol,
             }
         result = await asyncio.to_thread(mt5.order_send, request)
@@ -320,15 +260,15 @@ class Coverage:
     def calcular_cobertura(self, orders_list, balance):
         # Esta función es solo matemática, no necesita ser async
         stop_out = self.calcular_stop_out(orders_list, balance)
-        margen_total = self.cantidad_de_ordenes * self.margen_cobertura
+        margen_total = self.orders.cantidad_de_ordenes * self.margen_cobertura
         cobertura = stop_out + margen_total
         return cobertura    
 
     async def modificar_cobertura_pendiente(self, orders_list, balance):
-        order_info_tuple = await asyncio.to_thread(mt5.orders_get, ticket=self.ticket_cobertura)
+        order_info_tuple = await asyncio.to_thread(mt5.orders_get, ticket=self.orders.ticket_cobertura)
         
         if order_info_tuple is None or len(order_info_tuple) == 0: 
-            print(f"No se reconoció el ticket {self.ticket_cobertura} para modificar su precio. No se realiza ninguna acción.")
+            print(f"No se reconoció el ticket {self.orders.ticket_cobertura} para modificar su precio. No se realiza ninguna acción.")
             return False
             
         order_info = order_info_tuple[0]
@@ -337,7 +277,7 @@ class Coverage:
             self.ultimo_precio_cobertura = nuevo_precio_cobertura
             request = {
                 "action": mt5.TRADE_ACTION_MODIFY,
-                "order": self.ticket_cobertura,
+                "order": self.orders.ticket_cobertura,
                 "symbol": self.asset,
                 "price": nuevo_precio_cobertura,
                 "sl": order_info.sl,
@@ -351,7 +291,7 @@ class Coverage:
 
     async def gestionar_cobertura_activa(self):
         precio_bid = await self.obtener_precio_bid()
-        position_info_tuple = await asyncio.to_thread(mt5.positions_get, ticket=self.ticket_cobertura)
+        position_info_tuple = await asyncio.to_thread(mt5.positions_get, ticket=self.orders.ticket_cobertura)
         
         if not position_info_tuple:
             print("No se pudo obtener información de la cobertura activa con el ticket proporcionado. No podemos gestionarla.")
@@ -370,7 +310,7 @@ class Coverage:
     async def implementar_break_even(self, info_cobertura, precio_apertura):
         request = {
                 "action": mt5.TRADE_ACTION_SLTP,
-                "position": self.ticket_cobertura,
+                "position": self.orders.ticket_cobertura,
                 "symbol": info_cobertura.symbol,
                 "sl": precio_apertura,
                 "tp": info_cobertura.tp,
@@ -387,7 +327,7 @@ class Coverage:
         nuevo_stop_loss = precio_cobertura + self.trailing_stop
         request = {
                 "action": mt5.TRADE_ACTION_SLTP,
-                "position": self.ticket_cobertura,
+                "position": self.orders.ticket_cobertura,
                 "symbol": info_cobertura.symbol,
                 "sl": nuevo_stop_loss,
                 "tp": info_cobertura.tp,
@@ -398,3 +338,72 @@ class Coverage:
             print(f"Error al modificar el SL para el trailing stop\nCódigo del error: {result.retcode}\nMensaje: {result.comment}")
         else:
             print("Trailing Stop de la cobertura implementado exitosamente!")
+
+class Orders:
+
+    def __init__(self):        
+        # --- Variables de control de cobertura ---
+        self.volumen_cobertura = 0
+        self.volumen_total = 0
+        self.cantidad_de_ordenes = 0
+        self.cobertura_activa = False
+        self.ticket_cobertura = 0
+
+    async def get_all_orders(self)->dict:
+        """
+        Recupera todas las posiciones activas y órdenes pendientes de forma no bloqueante.
+
+        La estructura es:
+
+            {'Activo': [(Precio de apertura, Lotaje)], }
+
+        """
+        all_orders = defaultdict(list)
+        active_orders = await self.get_active_orders()
+        pending_orders = await self.get_pending_orders()
+        
+        for key, value_list in active_orders.items():
+            all_orders[key].extend(value_list)
+        for key, value_list in pending_orders.items():
+            all_orders[key].extend(value_list)
+        return dict(all_orders)
+
+    async def get_active_orders(self):
+        group_active_orders = defaultdict(list)
+        positions = await asyncio.to_thread(mt5.positions_get)
+        
+        if positions is not None:
+            for position in positions:
+                if position.comment == "cobertura":
+                    self.cobertura_activa = True
+                    self.ticket_cobertura = position.ticket
+                    self.volumen_cobertura = position.volume
+                else:
+                    volume = position.volume
+                    stop_loss = position.sl
+                    price = position.price_open
+                    if stop_loss >= price: continue # Ignoramos esta posición al no tener riesgos asociados.
+                    self.volumen_total += volume
+                    self.cantidad_de_ordenes += 1
+                    group_active_orders[position.symbol].append((position.price_open, volume))
+        return group_active_orders
+
+    async def get_pending_orders(self):
+        group_pending_orders = defaultdict(list)
+        orders = await asyncio.to_thread(mt5.orders_get)
+        
+        if orders is not None:
+            for order in orders:
+                if order.comment == "cobertura":
+                    self.cobertura_activa = False
+                    self.ticket_cobertura = order.ticket
+                    self.volumen_cobertura = order.volume_initial
+                else:
+                    volume = order.volume_initial
+                    stop_loss = order.sl
+                    price = order.price_open
+                    if stop_loss >= price: continue # Ignoramos esta posición al no tener riesgos asociados.
+                    self.volumen_total += volume
+                    self.cantidad_de_ordenes += 1
+                    group_pending_orders[order.symbol].append((order.price_open, volume))
+        return group_pending_orders  

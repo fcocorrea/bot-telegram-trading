@@ -26,6 +26,7 @@ class Strategy:
         self.pessimistic_resistance = pessimistic_resistance
         self.risk = risk # Riesgo por operación
         self.asset_regex = asset_regex
+        self.try_with_min_vol = False
 
         numeric_data = ["price", "stop_loss"]
         
@@ -102,7 +103,8 @@ class Strategy:
                     if op_volume != vol_min:
                         # Si la operación nos deja con un riesgo de SO, probamos con lotaje mínimo
                         print("Probamos con lotaje mínimo para menor exposición de riesgo...")
-                        return await self.__check_risk_exposure(orders_list[:-1], vol_min)
+                        self.try_with_min_vol = await self.__check_risk_exposure(orders_list[:-1], vol_min)
+                        return self.try_with_min_vol
                     else:
                         print(f"Orden rechazada: La orden \"{self.order_type}\" del activo {self.asset} con precio {self.price} deja una exposición mayor a la permitida.")
                         return False
@@ -137,13 +139,14 @@ class Coverage:
 
       """
 
-    def __init__(self, asset:str, margen_cobertura:float, balance:float=0, break_even:float=0, trailing_stop:float=0):
+    def __init__(self, asset:str, account_type:str, margen_cobertura:float, balance:float=0, break_even:float=0, trailing_stop:float=0):
         self.asset = asset # para que funcione, debo tener un solo asset en cartera.
+        self.account_type = account_type # Adaptar a dos tipos de cuentas: En dólares y en centavos
         self.balance = balance
         self.trailing_stop = trailing_stop
         self.break_even = break_even
         self.margen_cobertura = margen_cobertura
-        self.crypto_symbols = ['BTCUSD', 'ETHUSD']
+        self.crypto_symbols = ['BTCUSDc', 'ETHUSDc'] if account_type == "USC" else ['BTCUSD', 'ETHUSD']
         self.ultimo_precio_cobertura = 0
         # Instanciamos la clase Orders
         self.orders = Orders() 

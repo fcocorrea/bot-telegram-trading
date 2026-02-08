@@ -31,7 +31,7 @@ class TelegramInput:
     async def start_listening(self):
         """Inicia la escucha de mensajes."""
         
-        @self.client.on(events.NewMessage)
+        @self.client.on(events.NewMessage(chats=[-1003169821641, 6685390587]))
         async def new_message_listener(event):
             await self.handle_new_message(event)
 
@@ -69,23 +69,27 @@ class TradingOrder:
         price_match = r"\$?(\d+(\.\d+)?)"
         stop_loss_match = r"Sl:\s?(\d+(\.\d+)?)"
         take_profit_match = r"Tp:\s?(\d+(\.\d+)?)"
-        trailing_stop_match = r"SL [A-Z0-9]+ \$(\d+(\.\d+)?)"         
+        trailing_stop_match = r"SL [A-Z0-9]+ \$(\d+(\.\d+)?)"
+
+        # Calculamos el volumen mínimo por operación
+            
         
         order_instruction = {}
         order_search = re.search(order_match, telegram_message, re.IGNORECASE)
         
         if order_search:
             asset_base = order_search.group(1)
-            asset = asset_base
+            asset = asset_base + "c" if self.my_trading_account.account_type == "USC" else asset_base
             price_search = re.search(price_match, telegram_message)
             stop_loss_search = re.search(stop_loss_match, telegram_message, re.IGNORECASE)
             take_profit_search = re.search(take_profit_match, telegram_message, re.IGNORECASE)
-            trailing_stop_search = re.search(trailing_stop_match, telegram_message, re.IGNORECASE)        
+            trailing_stop_search = re.search(trailing_stop_match, telegram_message, re.IGNORECASE)     
             
             order_instruction["order_type"] = order_type.strip()
-            order_instruction["asset"] = asset          
-            if order_type != "Trailing Stop" and price_search: 
-                order_instruction["price"] = price_search.group(1)
+            order_instruction["asset"] = asset         
+            if order_type != "Trailing Stop" and price_search:
+                # Si el precio es a mercado, debo calcularlo yo (puede ser muy distinto al de telegram por lag)
+                order_instruction["price"] = self.get_market_price(asset, price_search, order_type)
                 order_instruction["stop_loss"] = "0.0" if not stop_loss_search else stop_loss_search.group(1)
                 order_instruction["take_profit"] = "0.0" if not take_profit_search else take_profit_search.group(1)
                 order_instruction["volume"] = self.calculate_volume(asset, order_instruction["price"], order_instruction["stop_loss"])
@@ -121,8 +125,11 @@ class TradingOrder:
             print("No se detectó una orden válida en el mensaje.")
             return
         
-        accept_order = await self.filter_order_by_strategy(order)
-        if not accept_order: return
+        accept_order = strategy.Strategy(self.cobertura, order, **self.estrategia)
+
+        if not await accept_order.filter_order():
+            print(f"Orden para {order.get('asset')} rechazada por filtros de riesgo/distancia.")
+            return
 
         print("Orden de trading: ", order)
         order_type = order.get("order_type")
@@ -137,6 +144,10 @@ class TradingOrder:
             print("Error al convertir datos numéricos.")
             return
         
+        if accept_order.try_with_min_vol:
+            info_symbol = mt5.symbol_info(asset)
+            volume  = info_symbol.volume_min # Se puede refactorizar para que el volumen mínimo sea obtenido una sola vez.
+
         if not order_type or not asset:
             print("La orden detectada no tiene tipo o activo. Omitiendo.")
             return
@@ -157,7 +168,6 @@ class TradingOrder:
             await self.cobertura.gestionar_cobertura()
 
     async def filter_order_by_strategy(self, order):        
-
         my_strategy = strategy.Strategy(self.cobertura, order, **self.estrategia)
         return await my_strategy.filter_order()
     
@@ -187,6 +197,25 @@ class TradingOrder:
             return 0.0
         else:
             return volume
+        
+    def get_market_price(self, symbol, price_search:str, order:str):
+        """ Obtenemos el precio as, bid o el precio desde telegram según sea el caso. 
+        
+        Ask: Precio cuando es una compra a mercado
+        Bid: Precio cuando es una venta a mercado
+        price_search: Match de precio realizado con regex
+        """
+        last_tick = mt5.symbol_info_tick(symbol)
+        if order == "Compra":
+            return last_tick.ask
+        elif order == "Venta":
+            return last_tick.bid
+        else:
+            return price_search.group(1)
+
+
+
+
         
 class PendingOperations(TradingOrder):
     """ Clase que maneja el mensaje de las operaciones pendientes """
@@ -273,7 +302,7 @@ class PendingOperations(TradingOrder):
 class TradingAccount:
     """ Clase para conectarse y operar en una cuenta de trading. """
 
-    def __init__(self):
+    def __init__(self, account_type):
         # __init__ es síncrono. La inicialización de MT5 es bloqueante
         # pero se hace una sola vez al inicio, ANTES del bucle async.
         if not mt5.initialize():
@@ -281,7 +310,8 @@ class TradingAccount:
             quit()
         else:
             print("¡Conexión con MetaTrader 5 establecida con éxito!")
-        self.crypto_symbols = ['BTCUSD', 'ETHUSD']
+        self.account_type = account_type # Puede ser USD o USC
+        self.crypto_symbols = ['BTCUSD', 'ETHUSD'] if account_type == "USC" else ['BTCUSD', 'ETHUSD']
 
     async def _get_trade_request(self, asset, order_type, volume, sl=0.0, tp=0.0, price=0.0):
         """
@@ -590,18 +620,22 @@ async def main():
     # Iniciar la escucha de Telegram
     listener_task = asyncio.create_task(telegram_input.start_listening())
     
-    # Conectarse a la cuenta (esto es síncrono, se hace una vez)
-    my_trading_account = TradingAccount()
 
     # IMPORTANTE: En este punto, debemos descargar las preferencias del usuario para la estrategia
     # Puede que el usuario no quiera una cobertura, si no un stop-loss!
+    # Estos parámetros están aquí mientras tanto. La idea es que se descarguen desde un campo rellenado por el usuario.
 
     utilizar_cobertura = False
+    account_type = "USD"
 
-    # Estos parámetros están aquí mientras tanto. La idea es que se descargen desde un campo rellenado por el usuario.
-    parametros_cobertura = {"asset": "BTCUSDc", "margen_cobertura": 400, "balance": 0, "break_even": 200, "trailing_stop": 400}
-    parametros_estrategia = {"distance":{"BTCUSDc": 0}, "pessimistic_resistance":{"BTCUSDc": 0}, 
-                             "risk": {"BTCUSDc": 0.03}, "asset_regex": r"BTCUSD"}
+    # Cambiar con sufijo "c" si estoy en cuenta Cent
+    parametros_cobertura = {"asset": "BTCUSD", "account_type": account_type, "margen_cobertura": 400, "balance": 0, 
+                            "break_even": 200, "trailing_stop": 400}
+    parametros_estrategia = {"distance":{"BTCUSD": 0}, "pessimistic_resistance":{"BTCUSD": 0}, 
+                             "risk": {"BTCUSD": 0.5}, "asset_regex": r"BTCUSD"}
+    
+    # Conectarse a la cuenta (esto es síncrono, se hace una vez)
+    my_trading_account = TradingAccount(account_type)
 
     # Configurar la cobertura (síncrono, se hace una vez)
     cobertura = strategy.Coverage(**parametros_cobertura) if utilizar_cobertura else None

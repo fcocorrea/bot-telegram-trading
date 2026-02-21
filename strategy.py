@@ -20,11 +20,12 @@ class Strategy:
     - risk: Es un diccionario cuya llave es el activo de la orden y el valor del riesgo que el usuario quiere tomar
     """
 
-    def __init__(self, cover, order, distance:dict, pessimistic_resistance:dict, risk:dict, asset_regex=r"[A-Z0-9]+"):
+    def __init__(self, cover, order, distance:dict, pessimistic_resistance:dict, risk:dict, volume:dict, asset_regex=r"[A-Z0-9]+"):
         self.cover = cover
         self.distance = distance
         self.pessimistic_resistance = pessimistic_resistance
         self.risk = risk # Riesgo por operación
+        self.volume = volume # Volumen por defecto. Si es igual o menor a cero, calculamos el volumen en base al riesgo.
         self.asset_regex = asset_regex
         self.try_with_min_vol = False
 

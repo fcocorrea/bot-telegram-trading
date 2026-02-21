@@ -166,17 +166,11 @@ class TradingOrder:
         # Gestionamos la cobertura después de realizar la orden
         if self.cobertura:
             await self.cobertura.gestionar_cobertura()
-
-    async def filter_order_by_strategy(self, order):        
-        my_strategy = strategy.Strategy(self.cobertura, order, **self.estrategia)
-        return await my_strategy.filter_order()
     
     def calculate_volume(self, asset, price, stop_loss):
-        try:
-            risk = self.estrategia["risk"][asset]
-        except (KeyError, TypeError) as e:
-            print(f"Error detectado ({type(e).__name__}). Usando riesgo por defecto: 0.01")
-            risk = 0.01
+        default_volume = self.estrategia["volume"][asset]
+        if default_volume > 0:  return default_volume # Si el volumen es diferente de cero, asumimos que el usuario quiere utilizar ese volumen, sin calcularlo por el riesgo máximo.
+        risk = self.estrategia["risk"][asset]
         try:
             price = float(price)
             stop_loss = float(stop_loss)
@@ -212,9 +206,6 @@ class TradingOrder:
             return last_tick.bid
         else:
             return price_search.group(1)
-
-
-
 
         
 class PendingOperations(TradingOrder):
@@ -311,7 +302,7 @@ class TradingAccount:
         else:
             print("¡Conexión con MetaTrader 5 establecida con éxito!")
         self.account_type = account_type # Puede ser USD o USC
-        self.crypto_symbols = ['BTCUSD', 'ETHUSD'] if account_type == "USC" else ['BTCUSD', 'ETHUSD']
+        self.crypto_symbols = ['BTCUSDc', 'ETHUSDc'] if account_type == "USC" else ['BTCUSD', 'ETHUSD']
 
     async def _get_trade_request(self, asset, order_type, volume, sl=0.0, tp=0.0, price=0.0):
         """
@@ -632,7 +623,7 @@ async def main():
     parametros_cobertura = {"asset": "BTCUSD", "account_type": account_type, "margen_cobertura": 400, "balance": 0, 
                             "break_even": 200, "trailing_stop": 400}
     parametros_estrategia = {"distance":{"BTCUSD": 0}, "pessimistic_resistance":{"BTCUSD": 0}, 
-                             "risk": {"BTCUSD": 0.5}, "asset_regex": r"BTCUSD"}
+                             "risk": {"BTCUSD": 0.03}, "volume": {"BTCUSD": 0.01}, "asset_regex": r"BTCUSD"}
     
     # Conectarse a la cuenta (esto es síncrono, se hace una vez)
     my_trading_account = TradingAccount(account_type)
